@@ -491,3 +491,75 @@ func (suite *HooksTestSuite) TestOnRecvPacketAxelar() {
 	// {\"contract_result\":\"Y29zbW9zMWdlZTdtN2t5Z3h1YzR4azQ4M2NldXFjZmN6djQ4eWd0bWt5c3J1\",\"ibc_ack\":\"eyJyZXN1bHQiOiJBUT09In0=\"}
 	suite.Require().Equal(ack["result"], "eyJjb250cmFjdF9yZXN1bHQiOiJZMjl6Ylc5ek1XZGxaVGR0TjJ0NVozaDFZelI0YXpRNE0yTmxkWEZqWm1ONmRqUTRlV2QwYld0NWMzSjEiLCJpYmNfYWNrIjoiZXlKeVpYTjFiSFFpT2lKQlVUMDlJbjA9In0=")
 }
+
+func (suite *HooksTestSuite) TestOnRecvPacketNotAxelar() {
+	// create en env
+	suite.SetupEnv()
+
+	// Fixed sender for testing
+	sender := "cosmos1jvsmg8xzp697vksd9chf5x0xyz96zd3eamlhpyeypmacvwljwtrsjnamxn"
+
+	suite.App.IBCHooksKeeper.SetParams(suite.Ctx, hooktypes.Params{
+		Axelar: &hooktypes.Axelar{
+			GmpAccount: sender,
+			ChannelId:  "channel-10",
+		},
+	})
+
+	// Create the packet
+	recvPacket := channeltypes.Packet{
+		Data: transfertypes.FungibleTokenPacketData{
+			Denom:    "transfer/channel-0/stake",
+			Amount:   "1",
+			Sender:   sender,
+			Receiver: suite.SenderContractAddr.String(),
+			Memo: fmt.Sprintf(`{"wasm":{"source_address": "%s", "contract": "%s", "msg":{"sender":{}}}}`,
+				"0x4673edfac441b98a9ad53c719e0309c09953910b",
+				suite.SenderContractAddr.String(),
+			),
+		}.GetBytes(),
+		SourcePort:         "transfer",
+		SourceChannel:      "channel-0",
+		DestinationChannel: "channel-11",
+	}
+
+	// send funds to the escrow address to simulate a transfer from the ibc module
+	escrowAddress := transfertypes.GetEscrowAddress(recvPacket.GetDestPort(), recvPacket.GetDestChannel())
+	err := suite.App.BankKeeper.SendCoins(suite.Ctx, suite.TestAddress.GetAddress(), escrowAddress, sdk.NewCoins(sdk.NewInt64Coin("stake", 2)))
+	suite.NoError(err)
+
+	// create the wasm hooks
+	wasmHooks := ibc_hooks.NewWasmHooks(
+		&suite.App.IBCHooksKeeper,
+		&suite.App.WasmKeeper,
+		"cosmos",
+	)
+
+	// create the ics4 middleware
+	ics4Middleware := ibc_hooks.NewICS4Middleware(
+		suite.App.IBCKeeper.ChannelKeeper,
+		wasmHooks,
+	)
+
+	// create the ibc middleware
+	transferIBCModule := ibctransfer.NewIBCModule(suite.App.TransferKeeper)
+	ibcmiddleware := ibc_hooks.NewIBCMiddleware(
+		transferIBCModule,
+		&ics4Middleware,
+	)
+
+	// call the hook twice
+	res := ibcmiddleware.OnRecvPacket(
+		suite.Ctx,
+		recvPacket,
+		suite.TestAddress.GetAddress(),
+	)
+	suite.True(res.Success())
+	var ack map[string]string // This can't be unmarshalled to Acknowledgement because it's fetched from the events
+	err = json.Unmarshal(res.Acknowledgement(), &ack)
+	suite.Require().NoError(err)
+	suite.Require().NotContains(ack, "error")
+	// cosmos1nnv92u628lyhztaznkjlmkhvpcs2lv6pp6lnyecm36hlr839gqgqalels8
+	// {\"contract_result\":\"Y29zbW9zMW5udjkydTYyOGx5aHp0YXpua2psbWtodnBjczJsdjZwcDZsbnllY20zNmhscjgzOWdxZ3FhbGVsczg==\",\"ibc_ack\":\"eyJyZXN1bHQiOiJBUT09In0=\"}
+	suite.Require().Equal(ack["result"], "eyJjb250cmFjdF9yZXN1bHQiOiJZMjl6Ylc5ek1XNXVkamt5ZFRZeU9HeDVhSHAwWVhwdWEycHNiV3RvZG5CamN6SnNkalp3Y0Rac2JubGxZMjB6Tm1oc2NqZ3pPV2R4WjNGaGJHVnNjemc9IiwiaWJjX2FjayI6ImV5SnlaWE4xYkhRaU9pSkJVVDA5SW4wPSJ9")
+}
